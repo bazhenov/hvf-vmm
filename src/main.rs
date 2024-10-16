@@ -1,92 +1,84 @@
 use applevisor::*;
+use std::{fs::File, io::Read, path::Path};
+
+// should be aligned to 2Mb boundary
+// https://www.kernel.org/doc/Documentation/arm64/booting.txt
+const START_ADDRESS: u64 = 0x200000;
 
 fn main() -> Result<()> {
-    // stub call to factorial, so that linker will not strip it
-    factorial(1);
-
     let _vm = VirtualMachine::new()?;
     let vcpu = Vcpu::new()?;
 
     vcpu.set_trap_debug_exceptions(true)?;
     vcpu.set_trap_debug_reg_accesses(true)?;
 
-    // see the assembly of factorial function below
-    let factorial_func: &[u32] = &[
-        0x7100041f, //
-        0x1a9f8408, //
-        0x7100081f, //
-        0x54000062, //
-        0x52800020, //
-        0xd65f03c0, //
-        0x52800049, //
-        0x52800020, //
-        0x1b007d20, //
-        0x6b08013f, //
-        0x1a89252a, //
-        0x54000082, //
-        0xaa0a03e9, //
-        0x6b08015f, //
-        0x54ffff49, //
-        0xd65f03c0, //
-    ];
+    let image = read_kernel_image("./vmlinux");
 
-    // because we only use branch instructions that are relative,
-    // our code is PIC, we can choose start address arbitrarily
-    const START_ADDRESS: u64 = 0x100000;
-    let mut mem = Mapping::new(0x100).unwrap();
-    mem.map(START_ADDRESS, MemPerms::RWX)?;
-    vcpu.set_reg(Reg::PC, START_ADDRESS)?;
+    let mut mem = Mapping::new(image.len()).unwrap();
+    mem.map(START_ADDRESS, MemPerms::RX)?;
 
-    // Jump to 0x00 after function return, it will generate exception
+    mem.write(START_ADDRESS, &image)?;
+    let mut stack = Mapping::new(0x100000).unwrap();
+    stack.map(0x100000, MemPerms::RW)?;
+    vcpu.set_sys_reg(SysReg::SP_EL0, 0x100000)?;
+    vcpu.set_sys_reg(SysReg::SP_EL1, 0x100000)?;
+
+    // Required to setup EL correctly
+    vcpu.set_reg(Reg::CPSR, 0x3c4)?;
+
+    let mut iv_table = Mapping::new(256 * 4).unwrap();
+    iv_table.map(0, MemPerms::RX)?;
+    iv_table.write_dword(0x000, 0xD4000002)?; // brk #0, for trapping back to hypervisor
+    iv_table.write_dword(0x400, 0xD4000002)?;
+
     vcpu.set_reg(Reg::LR, 0x00000000000)?;
-
-    // Factorial input values 10! = 3628800
-    vcpu.set_reg(Reg::X0, 10)?;
-
-    for (idx, instruction) in factorial_func.iter().enumerate() {
-        let offset = START_ADDRESS + idx as u64 * 4;
-        assert_eq!(mem.write_dword(offset, *instruction)?, 4);
-    }
+    //  Fake dtb address
+    vcpu.set_reg(Reg::X0, 0xFF000000000)?;
+    // On Aarch64 image can be run from the very beginning.
+    // 2nd instruction will take care of jumping to .text
+    vcpu.set_reg(Reg::PC, START_ADDRESS)?;
 
     match vcpu.run() {
         Ok(_) => {
-            // w0 is 32 low bits of x0
-            let w0 = vcpu.get_reg(Reg::X0)? & 0xffff_ffff;
-            assert_eq!(w0, 3_628_800);
-            println!("Ok");
+            println!("{}", vcpu.get_exit_info());
+
+            print_register_value("LR", vcpu.get_reg(Reg::LR)?);
+            print_register_value("PC", vcpu.get_reg(Reg::PC)?);
+            print_register_value("FP", vcpu.get_reg(Reg::FP)?);
+            print_register_value("X0", vcpu.get_reg(Reg::X0)?);
+            print_register_value("X1", vcpu.get_reg(Reg::X1)?);
+            print_register_value("X2", vcpu.get_reg(Reg::X2)?);
+            print_register_value("X3", vcpu.get_reg(Reg::X3)?);
+            print_register_value("X4", vcpu.get_reg(Reg::X4)?);
+            print_register_value("X21", vcpu.get_reg(Reg::X21)?);
+
+            // The ELR_ELn register is used to store the return address from an exception.
+            print_register_value("ELR_EL1", vcpu.get_sys_reg(SysReg::ELR_EL1)?);
+            print_register_value("SP_EL0", vcpu.get_sys_reg(SysReg::SP_EL0)?);
+            print_register_value("SP_EL1", vcpu.get_sys_reg(SysReg::SP_EL1)?);
+            print_register_value("ELR_EL1", vcpu.get_sys_reg(SysReg::ELR_EL1)?);
+            print_register_value("CPSR", vcpu.get_reg(Reg::CPSR)?);
+            Ok(())
         }
         Err(e) => {
-            println!("{:?}", e);
-            println!("{}", vcpu.get_exit_info());
+            eprintln!("{}", vcpu.get_exit_info());
+            panic!("{:?}", e);
         }
     }
-
-    Ok(())
 }
 
-/// 7100041f     cmp     w0, #0x1
-/// 1a9f8408     csinc   w8, w0, wzr, hi
-/// 7100081f     cmp     w0, #0x2
-/// 54000062     b.hs    0x100004b20 <_factorial+0x18>
-/// 52800020     mov     w0, #0x1                ; =1
-/// d65f03c0     ret
-/// 52800049     mov     w9, #0x2                ; =2
-/// 52800020     mov     w0, #0x1                ; =1
-/// 1b007d20     mul     w0, w9, w0
-/// 6b08013f     cmp     w9, w8
-/// 1a89252a     cinc    w10, w9, lo
-/// 54000082     b.hs    0x100004b44 <_factorial+0x3c>
-/// aa0a03e9     mov     x9, x10
-/// 6b08015f     cmp     w10, w8
-/// 54ffff49     b.ls    0x100004b28 <_factorial+0x20>
-/// d65f03c0     ret
-#[no_mangle]
-#[inline(never)]
-pub fn factorial(input: u32) -> u32 {
-    let input = input.max(1);
-    let mut fact = 1;
-    for i in 2..=input {
-        fact *= i;
-    }
-    fact
+fn print_register_value(name: &'static str, value: u64) {
+    println!(
+        "{:>8}: 0x{:016x} (rel: 0x{:016x})",
+        name,
+        value,
+        value - START_ADDRESS
+    );
+}
+
+fn read_kernel_image(path: impl AsRef<Path>) -> Vec<u8> {
+    let mut file = File::open(path).expect("Failed to open file");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read file");
+    buffer
 }
