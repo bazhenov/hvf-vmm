@@ -3,7 +3,7 @@ use std::{fs::File, io::Read, path::Path};
 
 // should be aligned to 2Mb boundary
 // https://www.kernel.org/doc/Documentation/arm64/booting.txt
-const START_ADDRESS: u64 = 0x200000;
+const START_ADDRESS: u64 = 0x40000000;
 
 fn main() -> Result<()> {
     let _vm = VirtualMachine::new()?;
@@ -13,18 +13,17 @@ fn main() -> Result<()> {
     vcpu.set_trap_debug_reg_accesses(true)?;
 
     let image = read_kernel_image("./vmlinux");
+    println!("Image size: 0x{:0x}", image.len());
 
-    let mut mem = Mapping::new(image.len()).unwrap();
-    mem.map(START_ADDRESS, MemPerms::RX)?;
+    let mut mem = Mapping::new(image.len() * 10).unwrap();
+    mem.map(START_ADDRESS, MemPerms::RWX)?;
 
-    mem.write(START_ADDRESS, &image)?;
-    let mut stack = Mapping::new(0x100000).unwrap();
-    stack.map(0x100000, MemPerms::RW)?;
-    vcpu.set_sys_reg(SysReg::SP_EL0, 0x100000)?;
-    vcpu.set_sys_reg(SysReg::SP_EL1, 0x100000)?;
+    let bytes_copied = mem.write(START_ADDRESS, &image)?;
+    assert_eq!(bytes_copied, image.len());
 
     // Required to setup EL correctly
-    vcpu.set_reg(Reg::CPSR, 0x3c4)?;
+    // 0x3c4 to use the same stack for both EL0/EL1
+    vcpu.set_reg(Reg::CPSR, 0x3c5)?;
 
     let mut iv_table = Mapping::new(256 * 4).unwrap();
     iv_table.map(0, MemPerms::RX)?;
@@ -34,46 +33,54 @@ fn main() -> Result<()> {
     vcpu.set_reg(Reg::LR, 0x00000000000)?;
     //  Fake dtb address
     vcpu.set_reg(Reg::X0, 0xFF000000000)?;
+
     // On Aarch64 image can be run from the very beginning.
     // 2nd instruction will take care of jumping to .text
     vcpu.set_reg(Reg::PC, START_ADDRESS)?;
 
-    match vcpu.run() {
-        Ok(_) => {
-            println!("{}", vcpu.get_exit_info());
+    loop {
+        match vcpu.run() {
+            Ok(_) => {
+                let syndrom = vcpu.get_exit_info().exception.syndrome;
+                let exception_class = (syndrom >> 26) & 0b111111;
 
-            print_register_value("LR", vcpu.get_reg(Reg::LR)?);
-            print_register_value("PC", vcpu.get_reg(Reg::PC)?);
-            print_register_value("FP", vcpu.get_reg(Reg::FP)?);
-            print_register_value("X0", vcpu.get_reg(Reg::X0)?);
-            print_register_value("X1", vcpu.get_reg(Reg::X1)?);
-            print_register_value("X2", vcpu.get_reg(Reg::X2)?);
-            print_register_value("X3", vcpu.get_reg(Reg::X3)?);
-            print_register_value("X4", vcpu.get_reg(Reg::X4)?);
-            print_register_value("X21", vcpu.get_reg(Reg::X21)?);
+                if exception_class == 22 {
+                    println!("HVC handling");
+                    continue;
+                } else if exception_class == 23 {
+                    println!("SMC handling");
+                    vcpu.set_reg(Reg::PC, vcpu.get_reg(Reg::PC)? + 4)?;
+                    continue;
+                }
 
-            // The ELR_ELn register is used to store the return address from an exception.
-            print_register_value("ELR_EL1", vcpu.get_sys_reg(SysReg::ELR_EL1)?);
-            print_register_value("SP_EL0", vcpu.get_sys_reg(SysReg::SP_EL0)?);
-            print_register_value("SP_EL1", vcpu.get_sys_reg(SysReg::SP_EL1)?);
-            print_register_value("ELR_EL1", vcpu.get_sys_reg(SysReg::ELR_EL1)?);
-            print_register_value("CPSR", vcpu.get_reg(Reg::CPSR)?);
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("{}", vcpu.get_exit_info());
-            panic!("{:?}", e);
+                println!("{}", vcpu.get_exit_info());
+                println!(
+                    "   Syndrome EC: 0b{:06b} ({})",
+                    exception_class, exception_class
+                );
+                println!("   Syndrome IL: 0b{:01b}", (syndrom >> 25) & 0b1);
+                println!("  Syndrome ISS: 0b{:025b}", syndrom & 0x1FFF);
+                println!();
+
+                println!("{}", vcpu);
+
+                print_register_value("LR", vcpu.get_reg(Reg::LR)?);
+                print_register_value("PC", vcpu.get_reg(Reg::PC)?);
+                // The ELR_ELn register is used to store the return address from an exception.
+                print_register_value("ELR_EL1", vcpu.get_sys_reg(SysReg::ELR_EL1)?);
+
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{}", vcpu.get_exit_info());
+                panic!("{:?}", e);
+            }
         }
     }
 }
 
 fn print_register_value(name: &'static str, value: u64) {
-    println!(
-        "{:>8}: 0x{:016x} (rel: 0x{:016x})",
-        name,
-        value,
-        value - START_ADDRESS
-    );
+    println!("{:>10} rel: {:016x}", name, value - START_ADDRESS);
 }
 
 fn read_kernel_image(path: impl AsRef<Path>) -> Vec<u8> {
