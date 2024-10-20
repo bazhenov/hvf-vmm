@@ -8,12 +8,15 @@ use std::{
     time::Duration,
 };
 
+const BOOTLOADER_ADDRESS: u64 = 0x01_0000;
+const DTB_ADDRESS: u64 = 0x20_0000;
+const UART_ADDRESS: u64 = 0x4100_0000;
+const RAM_ADDRESS: u64 = 0x8000_0000;
+const RAM_SIZE: u64 = 0x4000_0000;
+
 // should be aligned to 2Mb boundary
 // https://www.kernel.org/doc/Documentation/arm64/booting.txt
 const START_ADDRESS: u64 = 0x01_0000_0000;
-const BOOTLOADER_ADDRESS: u64 = 0x01_0000;
-const DTB_ADDRESS: u64 = 0x20_0000;
-const UART_ADDRESS: u64 = 0x41000000;
 
 fn main() -> Result<()> {
     let _vm = VirtualMachine::new()?;
@@ -34,9 +37,10 @@ fn main() -> Result<()> {
     let _kernel = map_region(
         "./vmlinux",
         START_ADDRESS,
-        Some(256 * 1024 * 1024),
+        Some(512 * 1024 * 1024),
         MemPerms::RWX,
     )?;
+
     let _bootloader = map_region("./main.bin", BOOTLOADER_ADDRESS, None, MemPerms::RX)?;
     let _dtb = map_region("./device-tree-block", DTB_ADDRESS, None, MemPerms::R)?;
 
@@ -46,15 +50,18 @@ fn main() -> Result<()> {
 
     let mut m = Mapping::new(0x800).unwrap();
     m.map(0, MemPerms::RX).unwrap();
-
     for i in [0x00, 0x200, 0x400, 0x600] {
         m.write_dword(i, 0xD4001FE2)?; // hvc 255
         m.write_dword(i + 4, 0xD69F03E0)?; // eret
     }
 
+    let mut ram = Mapping::new(RAM_SIZE as usize).unwrap();
+    ram.map(RAM_ADDRESS, MemPerms::RW).unwrap();
+
     let mut mmio = Mmio::default();
     mmio.register(UART_ADDRESS, PAGE_SIZE as u64, pl011_uart::Controller)?;
 
+    // By lonux boot convetions, X0 should contains the address of the device tree block
     vcpu.set_reg(Reg::X0, DTB_ADDRESS)?;
 
     // On Aarch64 image can be run from the very beginning.
@@ -130,6 +137,7 @@ fn main() -> Result<()> {
                             vcpu.set_reg(Reg::PC, next_pc)?;
                             continue;
                         } else {
+                            println!("{}", exit_info);
                             println!("{}", vcpu);
 
                             println!(
@@ -235,19 +243,9 @@ const ISS_MDSCR_EL1: MsrISS = MsrISS {
 fn trap_msr_mrs(vcpu: &Vcpu, syndrom: u64) -> Result<bool> {
     let iss = MsrISS::new(syndrom);
     let reg = (syndrom >> 6) & 0b11111;
-    let direction = syndrom & 0b1;
+    let write = syndrom & 0b1 == 0;
 
-    if iss.op0 == 0b10
-        && iss.op1 == 0b000
-        && iss.crn == 0b0000
-        && iss.crm == 0b0010
-        && iss.op2 == 0b010
-    {
-        // Handle the specific case
-        // You can add your logic here
-    }
-
-    if direction == 0 {
+    if write {
         if iss == ISS_MDSCR_EL1 {
             let value = vcpu.get_reg(get_register(reg))?;
             vcpu.set_sys_reg(SysReg::MDSCR_EL1, value)?;
