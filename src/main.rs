@@ -11,12 +11,11 @@ use std::{
 const BOOTLOADER_ADDRESS: u64 = 0x01_0000;
 const DTB_ADDRESS: u64 = 0x20_0000;
 const UART_ADDRESS: u64 = 0x4100_0000;
-const RAM_ADDRESS: u64 = 0x8000_0000;
-const RAM_SIZE: u64 = 0x4000_0000;
 
 // should be aligned to 2Mb boundary
 // https://www.kernel.org/doc/Documentation/arm64/booting.txt
-const START_ADDRESS: u64 = 0x01_0000_0000;
+const RAM_ADDRESS: u64 = 0x8000_0000;
+const RAM_SIZE: u64 = 0x4000_0000;
 
 fn main() -> Result<()> {
     let _vm = VirtualMachine::new()?;
@@ -35,9 +34,10 @@ fn main() -> Result<()> {
     // vcpu.set_trap_debug_reg_accesses(true)?;
 
     let _kernel = map_region(
+        // "/Users/bazhenov/Downloads/vmlinux",
         "./vmlinux",
-        START_ADDRESS,
-        Some(512 * 1024 * 1024),
+        RAM_ADDRESS,
+        Some(RAM_SIZE as usize),
         MemPerms::RWX,
     )?;
 
@@ -55,9 +55,6 @@ fn main() -> Result<()> {
         m.write_dword(i + 4, 0xD69F03E0)?; // eret
     }
 
-    let mut ram = Mapping::new(RAM_SIZE as usize).unwrap();
-    ram.map(RAM_ADDRESS, MemPerms::RW).unwrap();
-
     let mut mmio = Mmio::default();
     mmio.register(UART_ADDRESS, PAGE_SIZE as u64, pl011_uart::Controller)?;
 
@@ -67,7 +64,7 @@ fn main() -> Result<()> {
     // On Aarch64 image can be run from the very beginning.
     // 2nd instruction will take care of jumping to .text
     vcpu.set_reg(Reg::PC, BOOTLOADER_ADDRESS)?;
-    vcpu.set_reg(Reg::X10, START_ADDRESS)?;
+    vcpu.set_reg(Reg::X10, RAM_ADDRESS)?;
 
     // Disabling MMU
     vcpu.set_sys_reg(
@@ -316,7 +313,7 @@ fn map_region(
 }
 
 fn print_register_value(name: &'static str, value: u64) {
-    println!("{:>10} rel: {:016x}", name, value - START_ADDRESS);
+    println!("{:>10} rel: {:016x}", name, value - RAM_ADDRESS);
 }
 
 fn read_image(path: impl AsRef<Path>) -> Vec<u8> {
