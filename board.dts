@@ -4,17 +4,17 @@
     #address-cells = <2>;
     #size-cells = <2>;
     compatible = "linux,dummy-virt";
-    interrupt-parent = <0x01>;
+    interrupt-parent = <&aic>;
 
-    intc {
+    aic: intc {
         #address-cells = <0x02>;
         interrupts = <0x01 0x08 0x04>;
         #size-cells = <0x02>;
         compatible = "arm,gic-v3";
         ranges;
         #interrupt-cells = <0x03>;
-        reg = <0x00 0x3ffd0000 0x00 0x10000 0x00 0x3ffe0000 0x00 0x20000>;
-        phandle = <0x01>;
+        reg = <0x00 0x3ffd0000 0x00 0x10000>,
+              <0x00 0x3ffe0000 0x00 0x20000>;
         interrupt-controller;
     };
 
@@ -30,7 +30,6 @@
     cpus {
         #address-cells = <1>;
         #size-cells = <0>;
-        #timebase-frequency = <62500000>;
 
         cpu@0 {
             device_type = "cpu";
@@ -41,7 +40,10 @@
 
     timer {
         always-on;
-        interrupts = <0x01 0x0d 0x04 0x01 0x0e 0x04 0x01 0x0b 0x04 0x01 0x0c 0x04>;
+        interrupts = <0x01 0x0d 0x04>,
+                     <0x01 0x0e 0x04>,
+                     <0x01 0x0b 0x04>,
+                     <0x01 0x0c 0x04>;
         compatible = "arm,armv8-timer";
     };
 };
