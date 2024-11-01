@@ -21,28 +21,15 @@ fn main() -> Result<()> {
     let _vm = VirtualMachine::new()?;
     let vcpu = Vcpu::new()?;
 
-    // let iv_size = 0x800u64 / 4 + 1;
-    // let mut iv_table = Mapping::new(iv_size as usize * 4).unwrap();
-    // iv_table.map(0, MemPerms::RX)?;
-    // for i in 0..iv_size {
-    //     iv_table.write_dword(i * 4, 0xD4000002)?; // hvc 0
-    //     iv_table.write_dword(i * 4, 0x020000D4)?; // hvc 0
-    // }
-    // vcpu.set_sys_reg(SysReg::VBAR_EL1, 0)?;
-
-    // vcpu.set_trap_debug_exceptions(true)?;
-    // vcpu.set_trap_debug_reg_accesses(true)?;
-
     let _kernel = map_region(
-        // "/Users/bazhenov/Downloads/vmlinux",
         "./vmlinux",
         RAM_ADDRESS,
         Some(RAM_SIZE as usize),
         MemPerms::RWX,
     )?;
 
-    let _bootloader = map_region("./main.bin", BOOTLOADER_ADDRESS, None, MemPerms::RX)?;
-    let _dtb = map_region("./device-tree-block", DTB_ADDRESS, None, MemPerms::R)?;
+    let _bootloader = map_region("./target/main.bin", BOOTLOADER_ADDRESS, None, MemPerms::RX)?;
+    let _dtb = map_region("./target/board.dtb", DTB_ADDRESS, None, MemPerms::R)?;
 
     // Required to setup EL correctly
     // 0x3c4 to use the same stack for both EL0/EL1
@@ -54,6 +41,9 @@ fn main() -> Result<()> {
         m.write_dword(i, 0xD4001FE2)?; // hvc 255
         m.write_dword(i + 4, 0xD69F03E0)?; // eret
     }
+
+    let mut m = Mapping::new(0x10000).unwrap();
+    m.map(0x3ffd0000, MemPerms::RW).unwrap();
 
     let mut mmio = Mmio::default();
     mmio.register(UART_ADDRESS, PAGE_SIZE as u64, pl011_uart::Controller)?;
@@ -235,6 +225,22 @@ const ISS_MDSCR_EL1: MsrISS = MsrISS {
     op0: 0b10,
 };
 
+const ISS_OSDLR_EL1: MsrISS = MsrISS {
+    crm: 0b0011,
+    crn: 0b0001,
+    op1: 0b000,
+    op2: 0b100,
+    op0: 0b10,
+};
+
+const ISS_OSLAR_EL1: MsrISS = MsrISS {
+    crm: 0b0000,
+    crn: 0b0001,
+    op1: 0b000,
+    op2: 0b100,
+    op0: 0b10,
+};
+
 /// Process a Hypervisor traps of MSR/MRS instructions from EL1-level
 ///  https://developer.arm.com/documentation/ddi0601/2022-12/AArch64-Registers/ESR-EL2--Exception-Syndrome-Register--EL2-?lang=en#fieldset_0-24_0_14
 fn trap_msr_mrs(vcpu: &Vcpu, syndrom: u64) -> Result<bool> {
@@ -243,18 +249,24 @@ fn trap_msr_mrs(vcpu: &Vcpu, syndrom: u64) -> Result<bool> {
     let write = syndrom & 0b1 == 0;
 
     if write {
-        if iss == ISS_MDSCR_EL1 {
-            let value = vcpu.get_reg(get_register(reg))?;
-            vcpu.set_sys_reg(SysReg::MDSCR_EL1, value)?;
-            return Ok(true);
-        }
-        println!("Write access prohibited");
-        println!(
-            "Op0: 0b{:02b} Op1: 0b{:03b} Op2: 0b{:03b} CRn: 0b{:04b} CRm: 0b{:04b}",
-            iss.op0, iss.op1, iss.op2, iss.crn, iss.crm
-        );
+        match iss {
+            ISS_OSDLR_EL1 => Ok(true),
+            ISS_OSLAR_EL1 => Ok(true),
+            ISS_MDSCR_EL1 => {
+                let value = vcpu.get_reg(get_register(reg))?;
+                vcpu.set_sys_reg(SysReg::MDSCR_EL1, value)?;
+                Ok(true)
+            }
+            _ => {
+                println!("Write access prohibited");
+                println!(
+                    "Op0: 0b{:02b} Op1: 0b{:03b} Op2: 0b{:03b} CRn: 0b{:04b} CRm: 0b{:04b}",
+                    iss.op0, iss.op1, iss.op2, iss.crn, iss.crm
+                );
 
-        Ok(false)
+                Ok(false)
+            }
+        }
     } else {
         vcpu.set_reg(get_register(reg), 0)?;
         Ok(true)
