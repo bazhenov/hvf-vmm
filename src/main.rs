@@ -393,7 +393,7 @@ impl Mmio {
             base,
             size,
             controller,
-            mapping,
+            _mapping: mapping,
         });
         Ok(())
     }
@@ -411,7 +411,7 @@ struct MmioPeriphery {
     size: u64,
     controller: Box<dyn MmioController>,
     // We need to store mapping, otherwise it will be unmapped from guest memory
-    mapping: Mapping,
+    _mapping: Mapping,
 }
 
 trait MmioController {
@@ -419,6 +419,7 @@ trait MmioController {
     fn write(&mut self, addr: u64, value: u64) -> Option<u64>;
 }
 
+#[allow(non_upper_case_globals)]
 mod pl011_uart {
     use super::*;
 
